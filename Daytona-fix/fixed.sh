@@ -3,20 +3,70 @@ set -e
 
 RAILWAY_HOST="proxy-production-cad4.up.railway.app"
 LOCAL_PROXY="127.0.0.1:8796"
+GOST_VERSION="2.12.0"
 
-echo "[+] Setting up Daytona network proxy..."
+echo "[+] Installing Daytona network proxy..."
 
-# Stop any existing GOST process using port 8796
-pkill -f "127.0.0.1:8796" 2>/dev/null || true
+# Install basic tools if available
+apt-get update -o Acquire::Retries=3 || true
+apt-get install -y curl wget tar ca-certificates || true
 
-# Start GOST directly
+# Download GOST if not installed
+if ! command -v gost >/dev/null 2>&1; then
+    echo "[+] GOST not found, downloading..."
+
+    ARCH="$(uname -m)"
+
+    case "$ARCH" in
+        x86_64|amd64)
+            GOST_ARCH="amd64"
+            ;;
+        aarch64|arm64)
+            GOST_ARCH="arm64"
+            ;;
+        *)
+            echo "[!] Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+
+    TMP_DIR="$(mktemp -d)"
+
+    curl -fL \
+      "https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_${GOST_ARCH}.tar.gz" \
+      -o "$TMP_DIR/gost.tar.gz"
+
+    tar -xzf "$TMP_DIR/gost.tar.gz" -C "$TMP_DIR"
+
+    install -m 755 "$TMP_DIR/gost" /usr/local/bin/gost
+
+    rm -rf "$TMP_DIR"
+
+    echo "[+] GOST installed."
+fi
+
+echo "[+] GOST version:"
+gost -V || gost --version || true
+
+# Stop previous GOST bridge
+pkill -f "gost.*8796" 2>/dev/null || true
+
+# Start GOST
+echo "[+] Starting GOST..."
+
 nohup gost \
   -L="http://${LOCAL_PROXY}" \
   -F="http+mwss://${RAILWAY_HOST}:443?path=/ws" \
   >/tmp/gost.log 2>&1 &
 
-echo "[+] Starting GOST..."
-sleep 3
+sleep 4
+
+# Check listener
+if ! (echo >/dev/tcp/127.0.0.1/8796) >/dev/null 2>&1; then
+    echo "[!] GOST failed to start."
+    cat /tmp/gost.log
+    exit 1
+fi
 
 # Configure APT
 mkdir -p /etc/apt/apt.conf.d
@@ -38,11 +88,10 @@ export all_proxy="$ALL_PROXY"
 echo "[+] Testing proxy..."
 
 if curl -fsS \
-  -x "http://${LOCAL_PROXY}" \
-  https://deb.debian.org/ >/dev/null; then
+    -x "http://${LOCAL_PROXY}" \
+    https://deb.debian.org/ >/dev/null; then
 
     echo "[+] Proxy is working!"
-    echo "[+] Daytona network fix applied."
 
 else
 
@@ -53,11 +102,13 @@ else
 fi
 
 echo "[+] Running apt update..."
+
 apt-get update
 
 echo
 echo "========================================"
 echo " Daytona proxy is READY"
-echo " Local proxy: ${LOCAL_PROXY}"
-echo " Railway: ${RAILWAY_HOST}"
+echo "========================================"
+echo " Local proxy : ${LOCAL_PROXY}"
+echo " Railway     : ${RAILWAY_HOST}"
 echo "========================================"
